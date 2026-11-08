@@ -1,6 +1,6 @@
 /*! Air Fryer Card — compact glass card for an air fryer in Home Assistant · MIT · github.com/stathisktm/air-fryer-card */
 
-const AF_VERSION = "2.0.0";
+const AF_VERSION = "2.1.0";
 
 const AF_DEFAULTS = {
   title: "Φριτέζα Αέρος",
@@ -40,6 +40,9 @@ const AF_STATUS = {
   finished: "Ολοκληρώθηκε", done: "Ολοκληρώθηκε", complete: "Ολοκληρώθηκε",
   keep_warm: "Διατήρηση", keepwarm: "Διατήρηση", cooling: "Ψύξη",
 };
+
+/** Last time [entity] reported (not just repeated its state), in ms. */
+const afReportedAt = (entity) => new Date(entity?.last_reported || entity?.last_updated || 0).getTime();
 
 const afBad = (s) => s === undefined || s === null || s === "" || s === "unknown" || s === "unavailable";
 
@@ -455,7 +458,12 @@ class AirFryerCard extends HTMLElement {
     root.querySelector(".power-btn").classList.toggle("on", powerOn);
     root.querySelector(".play-btn ha-icon").setAttribute("icon", playOn ? "mdi:pause" : "mdi:play");
 
-    let statusText = status?.state;
+    // While the fryer is off its sensors keep their last reading. Show a reading only when it
+    // came in after the fryer was switched on; until then the time and temperature read zero.
+    const onSince = powerOn ? new Date(power.last_changed).getTime() - 2000 : Infinity;
+    const fresh = (entity) => !!entity && afReportedAt(entity) >= onSince;
+
+    let statusText = fresh(status) ? status?.state : null;
     if (afBad(statusText)) statusText = powerOn ? (playOn ? "Μαγείρεμα" : "Ενεργή") : "Ανενεργή";
     root.querySelector(".status").textContent = this._translateStatus(statusText);
 
@@ -467,7 +475,8 @@ class AirFryerCard extends HTMLElement {
     // Current temperature, with an arrow while it's still climbing toward the target.
     const currentTemp = this._getState(cfg.entity_current_temp);
     const targetTemp = this._getState(cfg.entity_target_temp);
-    const ct = currentTemp && !afBad(currentTemp.state) ? Number(currentTemp.state) : NaN;
+    const ct = !cfg.entity_current_temp ? NaN
+      : fresh(currentTemp) && !afBad(currentTemp.state) ? Number(currentTemp.state) : 0;
     const tt = targetTemp && !afBad(targetTemp.state) ? Number(targetTemp.state) : NaN;
     const heatingUp = powerOn && playOn && !Number.isNaN(ct) && !Number.isNaN(tt) && ct < tt - 3;
     root.querySelector(".current-temp").innerHTML = Number.isNaN(ct)
@@ -476,8 +485,8 @@ class AirFryerCard extends HTMLElement {
 
     // Remaining time: remember where the sensor stood and when, so the clock can keep ticking.
     const remaining = this._getState(cfg.entity_time_remaining);
-    const secs = afSeconds(remaining);
-    this._remain = secs === null ? null : { secs, at: new Date(remaining.last_updated || remaining.last_changed).getTime(), running: powerOn && playOn };
+    const secs = !cfg.entity_time_remaining ? null : fresh(remaining) ? (afSeconds(remaining) ?? 0) : 0;
+    this._remain = secs === null ? null : { secs, at: afReportedAt(remaining), running: powerOn && playOn && secs > 0 };
     const targetTime = this._getState(cfg.entity_target_time);
     const totalFromTarget = targetTime && !afBad(targetTime.state) ? Number(targetTime.state) * 60 : null;
     if (secs !== null) {
