@@ -1,6 +1,6 @@
 /*! Air Fryer Card — compact glass card for an air fryer in Home Assistant · MIT · github.com/stathisktm/air-fryer-card */
 
-const AF_VERSION = "2.2.1";
+const AF_VERSION = "2.3.0";
 
 const AF_DEFAULTS = {
   title: "Φριτέζα Αέρος",
@@ -41,6 +41,13 @@ const AF_STATUS = {
   keep_warm: "Διατήρηση", keepwarm: "Διατήρηση", cooling: "Ψύξη",
   door_open: "Πόρτα ανοιχτή", drawer_open: "Πόρτα ανοιχτή", basket_out: "Πόρτα ανοιχτή", lid_open: "Πόρτα ανοιχτή",
   suspend: "Παύση", suspended: "Παύση", stop: "Σταμάτησε", stopped: "Σταμάτησε",
+};
+
+/** Cookbook programs some fryers report instead of a status (BlitzWolf BW-AF1: DP 109). */
+const AF_MODES = {
+  default: "", standby: "", none: "", custom: "Χειροκίνητο", fries: "Πατάτες", frozen_fries: "Κατεψυγμένες πατάτες",
+  nuggets: "Nuggets", chicken: "Κοτόπουλο", steak: "Μπριζόλα", fish: "Ψάρι", shrimp: "Γαρίδες", cake: "Κέικ",
+  pizza: "Πίτσα", vegetables: "Λαχανικά", drumsticks: "Μπούτια", wings: "Φτερούγες", bacon: "Μπέικον",
 };
 
 /** Status values during which the timer stands still (paused, door/basket open, …). */
@@ -469,10 +476,15 @@ class AirFryerCard extends HTMLElement {
     const onSince = powerOn ? new Date(power.last_changed).getTime() - 2000 : Infinity;
     const fresh = (entity) => !!entity && afReportedAt(entity) >= onSince;
 
-    let statusText = fresh(status) ? status?.state : null;
-    if (afBad(statusText)) statusText = powerOn ? (playOn ? "Μαγείρεμα" : "Ενεργή") : "Ανενεργή";
-    this._statusLabel = this._translateStatus(statusText);
-    root.querySelector(".status").textContent = this._statusLabel;
+    // The "status" entity is either a real status (cooking, paused, door_open, …) or — on fryers
+    // like the BW-AF1 — the cookbook program (standby / custom / fries …). A program is shown as
+    // such, and the status is worked out from power, play and whether the timer is moving.
+    const raw = fresh(status) && !afBad(status.state) ? String(status.state).trim() : null;
+    const modeKey = raw ? raw.toLowerCase().replace(/\s+/g, "_") : null;
+    const isMode = modeKey !== null && modeKey in AF_MODES;
+    const program = isMode ? AF_MODES[modeKey] : "";
+    let statusText = !isMode && raw ? raw : null;
+    root.querySelector(".status-label").textContent = program ? `Κατάσταση · ${program}` : "Κατάσταση";
 
     // OFF -> color_off · ON + PAUSE (or door open) -> color_on_pause · ON + PLAY -> color_on_play
 
@@ -490,7 +502,16 @@ class AirFryerCard extends HTMLElement {
     // Remaining time: remember where the sensor stood and when, so the clock can keep ticking.
     const remaining = this._getState(cfg.entity_time_remaining);
     const secs = !cfg.entity_time_remaining ? null : fresh(remaining) ? (afSeconds(remaining) ?? 0) : 0;
-    const halted = !afBad(statusText) && AF_HALTED.test(String(statusText));
+    if (statusText === null) {
+      if (!powerOn) statusText = "Ανενεργή";
+      else if (playOn) statusText = secs === 0 && this._wasCooking ? "Ολοκληρώθηκε" : "Μαγείρεμα";
+      else statusText = secs > 0 && this._total && secs < this._total ? "Παύση" : "Αναμονή";
+    }
+    if (powerOn && playOn && secs > 0) this._wasCooking = true;
+    if (!powerOn) this._wasCooking = false;
+    this._statusLabel = this._translateStatus(statusText);
+    root.querySelector(".status").textContent = this._statusLabel;
+    const halted = AF_HALTED.test(String(statusText)) || statusText === "Παύση";
     const box = root.querySelector(".status-box");
     box.classList.toggle("pause", powerOn && (!playOn || (halted && secs > 0)));
     box.classList.toggle("play", powerOn && playOn && !(halted && secs > 0));
@@ -501,7 +522,9 @@ class AirFryerCard extends HTMLElement {
       const gap = (at - this._remain.at) / 1000;
       if (gap >= 0.5 && gap <= 120) this._interval = this._interval ? Math.min(this._interval, gap) : gap;
     }
-    this._remain = secs === null ? null : { secs, at, running: powerOn && playOn && !halted && secs > 0 };
+    // A remaining time given with seconds ("9:54") is reported every second while it runs.
+    const guess = remaining && String(remaining.state).split(":").length >= 2 ? 1 : 60;
+    this._remain = secs === null ? null : { secs, at, guess, running: powerOn && playOn && !halted && secs > 0 };
     const targetTime = this._getState(cfg.entity_target_time);
     const totalFromTarget = targetTime && !afBad(targetTime.state) ? Number(targetTime.state) * 60 : null;
     if (secs !== null) {
@@ -537,7 +560,7 @@ class AirFryerCard extends HTMLElement {
       // The sensor's own value can lag up to its update interval; never count past the next one.
       // If the next report doesn't come, the fryer has stopped counting (door/basket opened):
       // that's a pause even though its play switch still says on.
-      const limit = (this._interval || 60) + 2;
+      const limit = (this._interval || r.guess || 60) + 2;
       const elapsed = (Date.now() - r.at) / 1000;
       stalled = elapsed > limit && r.secs > 0;
       secs = Math.max(0, r.secs - Math.min(elapsed, limit));
@@ -587,7 +610,7 @@ const AF_LABELS = {
   title: "Τίτλος",
   entity_power: "Τροφοδοσία (on/off)",
   entity_play: "Έναρξη / παύση",
-  entity_status: "Κατάσταση",
+  entity_status: "Κατάσταση ή πρόγραμμα συσκευής (π.χ. BW-AF1 DP 109)",
   entity_time_remaining: "Χρόνος που απομένει",
   entity_current_temp: "Τρέχουσα θερμοκρασία",
   entity_program: "Πρόγραμμα",
