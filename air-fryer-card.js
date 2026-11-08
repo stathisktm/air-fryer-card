@@ -1,6 +1,6 @@
 /*! Air Fryer Card — compact glass card for an air fryer in Home Assistant · MIT · github.com/stathisktm/air-fryer-card */
 
-const AF_VERSION = "2.2.0";
+const AF_VERSION = "2.2.1";
 
 const AF_DEFAULTS = {
   title: "Φριτέζα Αέρος",
@@ -202,8 +202,9 @@ class AirFryerCard extends HTMLElement {
           content: ""; position: absolute; inset: 0; z-index: 0; opacity: 0; transition: opacity .35s ease;
           background: var(--af-status-play);
         }
-        .status-box.pause::before { opacity: 1; }
+        .status-box.pause::before, .status-box.stalled::before { opacity: 1; }
         .status-box.play::after { opacity: 1; }
+        .status-box.stalled::after { opacity: 0; }
         .status-box.pause, .status-box.play { box-shadow: 0 3px 14px rgba(0,0,0,.22); }
         .status-box > * { position: relative; z-index: 1; }
 
@@ -470,7 +471,8 @@ class AirFryerCard extends HTMLElement {
 
     let statusText = fresh(status) ? status?.state : null;
     if (afBad(statusText)) statusText = powerOn ? (playOn ? "Μαγείρεμα" : "Ενεργή") : "Ανενεργή";
-    root.querySelector(".status").textContent = this._translateStatus(statusText);
+    this._statusLabel = this._translateStatus(statusText);
+    root.querySelector(".status").textContent = this._statusLabel;
 
     // OFF -> color_off · ON + PAUSE (or door open) -> color_on_pause · ON + PLAY -> color_on_play
 
@@ -530,12 +532,20 @@ class AirFryerCard extends HTMLElement {
     if (!el) return;
     const r = this._remain;
     let secs = r ? r.secs : null;
+    let stalled = false;
     if (r && r.running && Number.isFinite(r.at)) {
       // The sensor's own value can lag up to its update interval; never count past the next one.
+      // If the next report doesn't come, the fryer has stopped counting (door/basket opened):
+      // that's a pause even though its play switch still says on.
       const limit = (this._interval || 60) + 2;
-      secs = Math.max(0, r.secs - Math.min((Date.now() - r.at) / 1000, limit));
+      const elapsed = (Date.now() - r.at) / 1000;
+      stalled = elapsed > limit && r.secs > 0;
+      secs = Math.max(0, r.secs - Math.min(elapsed, limit));
     }
     el.textContent = afClock(secs);
+    root.querySelector(".status-box")?.classList.toggle("stalled", stalled);
+    const status = root.querySelector(".status");
+    if (status && this._statusLabel !== undefined) status.textContent = stalled ? "Παύση" : this._statusLabel;
 
     const progress = root.querySelector(".progress");
     const total = this._total;
