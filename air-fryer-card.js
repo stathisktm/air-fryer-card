@@ -1,6 +1,6 @@
 /*! Air Fryer Card — compact glass card for an air fryer in Home Assistant · MIT · github.com/stathisktm/air-fryer-card */
 
-const AF_VERSION = "2.1.0";
+const AF_VERSION = "2.2.0";
 
 const AF_DEFAULTS = {
   title: "Φριτέζα Αέρος",
@@ -39,7 +39,12 @@ const AF_STATUS = {
   ready: "Έτοιμη", preheating: "Προθέρμανση", heating: "Θέρμανση",
   finished: "Ολοκληρώθηκε", done: "Ολοκληρώθηκε", complete: "Ολοκληρώθηκε",
   keep_warm: "Διατήρηση", keepwarm: "Διατήρηση", cooling: "Ψύξη",
+  door_open: "Πόρτα ανοιχτή", drawer_open: "Πόρτα ανοιχτή", basket_out: "Πόρτα ανοιχτή", lid_open: "Πόρτα ανοιχτή",
+  suspend: "Παύση", suspended: "Παύση", stop: "Σταμάτησε", stopped: "Σταμάτησε",
 };
+
+/** Status values during which the timer stands still (paused, door/basket open, …). */
+const AF_HALTED = /paus|suspend|door|drawer|basket|lid|open|stop|finish|done|complete/i;
 
 /** Last time [entity] reported (not just repeated its state), in ms. */
 const afReportedAt = (entity) => new Date(entity?.last_reported || entity?.last_updated || 0).getTime();
@@ -467,10 +472,7 @@ class AirFryerCard extends HTMLElement {
     if (afBad(statusText)) statusText = powerOn ? (playOn ? "Μαγείρεμα" : "Ενεργή") : "Ανενεργή";
     root.querySelector(".status").textContent = this._translateStatus(statusText);
 
-    // OFF -> color_off · ON + PAUSE -> color_on_pause · ON + PLAY -> color_on_play
-    const box = root.querySelector(".status-box");
-    box.classList.toggle("pause", powerOn && !playOn);
-    box.classList.toggle("play", powerOn && playOn);
+    // OFF -> color_off · ON + PAUSE (or door open) -> color_on_pause · ON + PLAY -> color_on_play
 
     // Current temperature, with an arrow while it's still climbing toward the target.
     const currentTemp = this._getState(cfg.entity_current_temp);
@@ -486,7 +488,18 @@ class AirFryerCard extends HTMLElement {
     // Remaining time: remember where the sensor stood and when, so the clock can keep ticking.
     const remaining = this._getState(cfg.entity_time_remaining);
     const secs = !cfg.entity_time_remaining ? null : fresh(remaining) ? (afSeconds(remaining) ?? 0) : 0;
-    this._remain = secs === null ? null : { secs, at: afReportedAt(remaining), running: powerOn && playOn && secs > 0 };
+    const halted = !afBad(statusText) && AF_HALTED.test(String(statusText));
+    const box = root.querySelector(".status-box");
+    box.classList.toggle("pause", powerOn && (!playOn || (halted && secs > 0)));
+    box.classList.toggle("play", powerOn && playOn && !(halted && secs > 0));
+    // How often the fryer reports the remaining time (learnt from its own updates), so the clock
+    // never runs on much past a report that didn't come — e.g. the door opened and it paused.
+    const at = afReportedAt(remaining);
+    if (secs !== null && secs > 0 && this._remain && this._remain.secs !== secs && Number.isFinite(this._remain.at)) {
+      const gap = (at - this._remain.at) / 1000;
+      if (gap >= 0.5 && gap <= 120) this._interval = this._interval ? Math.min(this._interval, gap) : gap;
+    }
+    this._remain = secs === null ? null : { secs, at, running: powerOn && playOn && !halted && secs > 0 };
     const targetTime = this._getState(cfg.entity_target_time);
     const totalFromTarget = targetTime && !afBad(targetTime.state) ? Number(targetTime.state) * 60 : null;
     if (secs !== null) {
@@ -519,7 +532,8 @@ class AirFryerCard extends HTMLElement {
     let secs = r ? r.secs : null;
     if (r && r.running && Number.isFinite(r.at)) {
       // The sensor's own value can lag up to its update interval; never count past the next one.
-      secs = Math.max(0, r.secs - (Date.now() - r.at) / 1000);
+      const limit = (this._interval || 60) + 2;
+      secs = Math.max(0, r.secs - Math.min((Date.now() - r.at) / 1000, limit));
     }
     el.textContent = afClock(secs);
 
